@@ -12,5 +12,10 @@ import java.util.UUID;
 public interface MessageRepository extends JpaRepository<Message, UUID> {
 
 	@Query(value = "SELECT * FROM messages WHERE conversation_id = :conversationId ORDER BY created_at DESC LIMIT :limit", nativeQuery = true)
-	List<Message> findRecentByConversationId(UUID conversationId, int limit);
+	List<Message> findRecentByConversationIdDesc(UUID conversationId, int limit);
+
+	default List<Message> findRecentByConversationId(UUID conversationId, int limit) {
+		List<Message> messages = findRecentByConversationIdDesc(conversationId, limit);
+		return messages.reversed();
+	}
 }
