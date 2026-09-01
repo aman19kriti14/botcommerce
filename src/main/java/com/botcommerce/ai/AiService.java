@@ -1,19 +1,34 @@
 package com.botcommerce.ai;
 
-import com.botcommerce.model.*;
-import com.botcommerce.repository.*;
-import com.botcommerce.service.CartService;
-import com.botcommerce.service.OrderService;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
-import java.util.*;
-import java.util.stream.Collectors;
+import com.botcommerce.model.Cart;
+import com.botcommerce.model.Conversation;
+import com.botcommerce.model.Customer;
+import com.botcommerce.model.KnowledgeEntry;
+import com.botcommerce.model.Merchant;
+import com.botcommerce.model.Message;
+import com.botcommerce.model.Order;
+import com.botcommerce.model.Product;
+import com.botcommerce.repository.KnowledgeEntryRepository;
+import com.botcommerce.repository.MessageRepository;
+import com.botcommerce.repository.ProductRepository;
+import com.botcommerce.service.CartService;
+import com.botcommerce.service.OrderService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Service
 @RequiredArgsConstructor
@@ -136,6 +151,10 @@ public class AiService {
 				String address = action.path("delivery_address").asText();
 				String deliveryType = action.has("delivery_type") ? action.path("delivery_type").asText() : "delivery";
 				String note = action.has("customer_note") ? action.path("customer_note").asText() : null;
+				CartService.CartSummary summary = cartService.getCartSummary(cart);
+				if (summary.getItems().isEmpty()) {
+					yield "Cart is empty — no order to place. Customer may have already ordered.";
+				}
 				Order order = orderService.createOrder(cart, customer, merchant, address, deliveryType, note);
 				String upiLink = merchant.getUpiId() != null
 						? "upi://pay?pa=" + merchant.getUpiId() + "&am=" + order.getTotal().toPlainString()

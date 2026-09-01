@@ -145,6 +145,11 @@ public class OrderService {
 		if (merchant.getWhatsappPhone() == null)
 			return;
 
+		String merchantPhone = merchant.getWhatsappPhone();
+		if (!merchantPhone.startsWith("91")) {
+			merchantPhone = "91" + merchantPhone;
+		}
+
 		StringBuilder msg = new StringBuilder();
 		msg.append("🔔 *New Order!* ").append(order.getOrderNumber()).append("\n\n");
 
