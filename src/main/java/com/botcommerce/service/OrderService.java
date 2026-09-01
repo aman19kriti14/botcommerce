@@ -166,7 +166,7 @@ public class OrderService {
 		}
 
 		// Send with accept/reject buttons
-		whatsAppSender.sendButtons(merchant.getWhatsappPhone(), msg.toString(),
+		whatsAppSender.sendButtons(merchantPhone, msg.toString(),
 				List.of(Map.of("id", "accept_" + order.getId(), "title", "✅ Accept"),
 						Map.of("id", "reject_" + order.getId(), "title", "❌ Reject")));
 	}
