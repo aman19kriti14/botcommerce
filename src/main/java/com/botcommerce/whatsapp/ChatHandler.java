@@ -58,8 +58,22 @@ public class ChatHandler {
 
 		// Check if customer is starting with a shop link
 		if (lowerText.startsWith("shop:")) {
-			String slug = lowerText.substring(5).trim();
+			String[] lines = text.trim().split("\n", 2);
+			String slug = lines[0].substring(5).trim().toLowerCase();
 			handleShopStart(from, customer, slug, messageId);
+
+			// If there's a second line (product order), process it after greeting
+			if (lines.length > 1 && !lines[1].isBlank()) {
+				String followUp = lines[1].trim();
+				// Small delay to let the greeting send first
+				new Thread(() -> {
+					try {
+						Thread.sleep(2000);
+					} catch (Exception e) {
+					}
+					handle(from, followUp, null);
+				}).start();
+			}
 			return;
 		}
 
