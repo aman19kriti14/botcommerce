@@ -1,6 +1,7 @@
 package com.botcommerce.whatsapp;
 
 import java.time.OffsetDateTime;
+import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -16,6 +17,7 @@ import com.botcommerce.repository.CustomerMerchantRepository;
 import com.botcommerce.repository.CustomerRepository;
 import com.botcommerce.repository.MerchantRepository;
 import com.botcommerce.repository.MessageRepository;
+import com.botcommerce.service.OrderService;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +29,7 @@ public class ChatHandler {
 
 	private final WhatsAppSender sender;
 	private final AiService aiService;
+	private final OrderService orderService;
 	private final CustomerRepository customerRepository;
 	private final MerchantRepository merchantRepository;
 	private final ConversationRepository conversationRepository;
@@ -35,6 +38,12 @@ public class ChatHandler {
 
 	@Transactional
 	public void handle(String from, String text, String messageId) {
+		// Check if this is a merchant action (accept/reject order)
+		if (text.startsWith("accept_") || text.startsWith("reject_")) {
+			handleMerchantAction(from, text);
+			return;
+		}
+
 		// Get or create customer
 		Customer customer = customerRepository.findByWhatsappPhone(from).orElseGet(() -> {
 			Customer c = Customer.builder().whatsappPhone(from).build();
@@ -50,12 +59,12 @@ public class ChatHandler {
 			return;
 		}
 
-		// Find active conversation for this customer
-		Conversation conversation = findActiveConversation(customer);
+		// Find active conversation
+		Conversation conversation = conversationRepository
+				.findTopByCustomerIdAndStatusOrderByLastMessageAtDesc(customer.getId(), "active").orElse(null);
 
 		if (conversation == null) {
-			sender.sendText(from,
-					"Hey! 👋 To get started, visit a store link shared by a shop owner. You'll be able to browse and order from there!");
+			sender.sendText(from, "Hey! 👋 To get started, visit a store link shared by a shop owner.");
 			return;
 		}
 
@@ -64,7 +73,6 @@ public class ChatHandler {
 
 		// Get merchant
 		Merchant merchant = merchantRepository.findById(conversation.getMerchant().getId()).orElse(null);
-
 		if (merchant == null) {
 			sender.sendText(from, "Sorry, something went wrong. Please try again.");
 			return;
@@ -73,15 +81,31 @@ public class ChatHandler {
 		// Generate AI response
 		String aiResponse = aiService.generateResponse(merchant, customer, conversation, text);
 
-		// Save bot response
+		// Save and send
 		saveMessage(conversation, "bot", aiResponse, null);
-
-		// Update conversation timestamp
 		conversation.setLastMessageAt(OffsetDateTime.now());
 		conversationRepository.save(conversation);
 
-		// Send response
 		sender.sendText(from, aiResponse);
+	}
+
+	private void handleMerchantAction(String from, String action) {
+		try {
+			String[] parts = action.split("_", 2);
+			String type = parts[0];
+			UUID orderId = UUID.fromString(parts[1]);
+
+			if ("accept".equals(type)) {
+				orderService.updateStatus(orderId, "accepted", null);
+				sender.sendText(from, "✅ Order accepted! The customer has been notified.");
+			} else if ("reject".equals(type)) {
+				orderService.updateStatus(orderId, "rejected", "Shop owner declined the order");
+				sender.sendText(from, "❌ Order rejected. The customer has been notified.");
+			}
+		} catch (Exception e) {
+			log.error("Error handling merchant action", e);
+			sender.sendText(from, "Sorry, couldn't process that action. Please try again.");
+		}
 	}
 
 	private void handleShopStart(String to, Customer customer, String slug, String messageId) {
@@ -93,41 +117,29 @@ public class ChatHandler {
 
 		Merchant merchant = merchantOpt.get();
 
-		// Create or get customer-merchant link
 		customerMerchantRepository.findByCustomerIdAndMerchantId(customer.getId(), merchant.getId()).orElseGet(() -> {
 			CustomerMerchant cm = CustomerMerchant.builder().customer(customer).merchant(merchant).build();
 			return customerMerchantRepository.save(cm);
 		});
 
-		// Close any existing conversation with this merchant
+		// Close existing conversations
 		conversationRepository.findByCustomerIdAndMerchantIdAndStatus(customer.getId(), merchant.getId(), "active")
 				.ifPresent(conv -> {
 					conv.setStatus("closed");
 					conversationRepository.save(conv);
 				});
 
-		// Create new conversation
 		Conversation conversation = Conversation.builder().customer(customer).merchant(merchant)
 				.lastMessageAt(OffsetDateTime.now()).build();
 		conversation = conversationRepository.save(conversation);
 
-		// Save the incoming message
 		saveMessage(conversation, "customer", "shop:" + slug, messageId);
 
-		// Generate AI greeting
 		String greeting = aiService.generateResponse(merchant, customer, conversation,
-				"Customer just opened the store. Greet them and show the menu highlights.");
+				"Customer just opened the store. Greet them warmly and show the product catalog.");
 
 		saveMessage(conversation, "bot", greeting, null);
-
 		sender.sendText(to, greeting);
-	}
-
-	private Conversation findActiveConversation(Customer customer) {
-		// Find any active conversation for this customer
-		// In a real app, you'd scope this better
-		return conversationRepository.findTopByCustomerIdAndStatusOrderByLastMessageAtDesc(customer.getId(), "active")
-				.orElse(null);
 	}
 
 	private void saveMessage(Conversation conversation, String senderType, String content, String waMessageId) {
