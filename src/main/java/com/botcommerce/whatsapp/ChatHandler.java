@@ -1,16 +1,21 @@
 package com.botcommerce.whatsapp;
 
-import java.util.List;
+import java.time.OffsetDateTime;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.botcommerce.ai.AiService;
+import com.botcommerce.model.Conversation;
 import com.botcommerce.model.Customer;
+import com.botcommerce.model.CustomerMerchant;
 import com.botcommerce.model.Merchant;
-import com.botcommerce.model.Product;
+import com.botcommerce.model.Message;
+import com.botcommerce.repository.ConversationRepository;
+import com.botcommerce.repository.CustomerMerchantRepository;
 import com.botcommerce.repository.CustomerRepository;
 import com.botcommerce.repository.MerchantRepository;
-import com.botcommerce.repository.ProductRepository;
+import com.botcommerce.repository.MessageRepository;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,9 +26,12 @@ import lombok.extern.slf4j.Slf4j;
 public class ChatHandler {
 
 	private final WhatsAppSender sender;
+	private final AiService aiService;
 	private final CustomerRepository customerRepository;
 	private final MerchantRepository merchantRepository;
-	private final ProductRepository productRepository;
+	private final ConversationRepository conversationRepository;
+	private final MessageRepository messageRepository;
+	private final CustomerMerchantRepository customerMerchantRepository;
 
 	@Transactional
 	public void handle(String from, String text, String messageId) {
@@ -35,23 +43,48 @@ public class ChatHandler {
 
 		String lowerText = text.toLowerCase().trim();
 
-		// For now: basic command-based responses
-		// Later: AI will handle this
+		// Check if customer is starting with a shop link
 		if (lowerText.startsWith("shop:")) {
-			// Customer clicked a store link: "shop:priya-cakes"
 			String slug = lowerText.substring(5).trim();
-			handleShopGreeting(from, slug);
-		} else if (lowerText.equals("menu") || lowerText.equals("catalog") || lowerText.equals("products")) {
-			sender.sendText(from,
-					"Please visit a store first by clicking a store link. You'll see the full catalog there!");
-		} else {
-			// Default response — will be replaced by AI
-			sender.sendText(from,
-					"Hey! 👋 Welcome to BotCommerce. To browse a store, click on a store link shared by the shop owner.");
+			handleShopStart(from, customer, slug, messageId);
+			return;
 		}
+
+		// Find active conversation for this customer
+		Conversation conversation = findActiveConversation(customer);
+
+		if (conversation == null) {
+			sender.sendText(from,
+					"Hey! 👋 To get started, visit a store link shared by a shop owner. You'll be able to browse and order from there!");
+			return;
+		}
+
+		// Save customer message
+		saveMessage(conversation, "customer", text, messageId);
+
+		// Get merchant
+		Merchant merchant = merchantRepository.findById(conversation.getMerchant().getId()).orElse(null);
+
+		if (merchant == null) {
+			sender.sendText(from, "Sorry, something went wrong. Please try again.");
+			return;
+		}
+
+		// Generate AI response
+		String aiResponse = aiService.generateResponse(merchant, customer, conversation, text);
+
+		// Save bot response
+		saveMessage(conversation, "bot", aiResponse, null);
+
+		// Update conversation timestamp
+		conversation.setLastMessageAt(OffsetDateTime.now());
+		conversationRepository.save(conversation);
+
+		// Send response
+		sender.sendText(from, aiResponse);
 	}
 
-	private void handleShopGreeting(String to, String slug) {
+	private void handleShopStart(String to, Customer customer, String slug, String messageId) {
 		var merchantOpt = merchantRepository.findBySlug(slug);
 		if (merchantOpt.isEmpty()) {
 			sender.sendText(to, "Sorry, couldn't find that store. Please check the link and try again.");
@@ -59,31 +92,47 @@ public class ChatHandler {
 		}
 
 		Merchant merchant = merchantOpt.get();
-		List<Product> products = productRepository.findAvailableByMerchantId(merchant.getId());
 
-		if (products.isEmpty()) {
-			sender.sendText(to, "Welcome to " + merchant.getBusinessName()
-					+ "! 🏪\n\nThe store is setting up their catalog. Please check back soon!");
-			return;
-		}
+		// Create or get customer-merchant link
+		customerMerchantRepository.findByCustomerIdAndMerchantId(customer.getId(), merchant.getId()).orElseGet(() -> {
+			CustomerMerchant cm = CustomerMerchant.builder().customer(customer).merchant(merchant).build();
+			return customerMerchantRepository.save(cm);
+		});
 
-		// Build product list message
-		StringBuilder msg = new StringBuilder();
-		msg.append("Welcome to *").append(merchant.getBusinessName()).append("*! 🏪\n\n");
-		msg.append("Here's what we have:\n\n");
+		// Close any existing conversation with this merchant
+		conversationRepository.findByCustomerIdAndMerchantIdAndStatus(customer.getId(), merchant.getId(), "active")
+				.ifPresent(conv -> {
+					conv.setStatus("closed");
+					conversationRepository.save(conv);
+				});
 
-		for (int i = 0; i < products.size(); i++) {
-			Product p = products.get(i);
-			msg.append(i + 1).append(". *").append(p.getName()).append("*");
-			msg.append(" — ₹").append(p.getPrice().stripTrailingZeros().toPlainString());
-			if (p.getDescription() != null) {
-				msg.append("\n   ").append(p.getDescription());
-			}
-			msg.append("\n\n");
-		}
+		// Create new conversation
+		Conversation conversation = Conversation.builder().customer(customer).merchant(merchant)
+				.lastMessageAt(OffsetDateTime.now()).build();
+		conversation = conversationRepository.save(conversation);
 
-		msg.append("To order, just type the product name or number! 🛒");
+		// Save the incoming message
+		saveMessage(conversation, "customer", "shop:" + slug, messageId);
 
-		sender.sendText(to, msg.toString());
+		// Generate AI greeting
+		String greeting = aiService.generateResponse(merchant, customer, conversation,
+				"Customer just opened the store. Greet them and show the menu highlights.");
+
+		saveMessage(conversation, "bot", greeting, null);
+
+		sender.sendText(to, greeting);
+	}
+
+	private Conversation findActiveConversation(Customer customer) {
+		// Find any active conversation for this customer
+		// In a real app, you'd scope this better
+		return conversationRepository.findTopByCustomerIdAndStatusOrderByLastMessageAtDesc(customer.getId(), "active")
+				.orElse(null);
+	}
+
+	private void saveMessage(Conversation conversation, String senderType, String content, String waMessageId) {
+		Message message = Message.builder().conversation(conversation).senderType(senderType).content(content)
+				.waMessageId(waMessageId).build();
+		messageRepository.save(message);
 	}
 }
