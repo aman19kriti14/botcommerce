@@ -12,11 +12,13 @@ import com.botcommerce.model.Customer;
 import com.botcommerce.model.CustomerMerchant;
 import com.botcommerce.model.Merchant;
 import com.botcommerce.model.Message;
+import com.botcommerce.model.Order;
 import com.botcommerce.repository.ConversationRepository;
 import com.botcommerce.repository.CustomerMerchantRepository;
 import com.botcommerce.repository.CustomerRepository;
 import com.botcommerce.repository.MerchantRepository;
 import com.botcommerce.repository.MessageRepository;
+import com.botcommerce.repository.OrderRepository;
 import com.botcommerce.service.OrderService;
 
 import lombok.RequiredArgsConstructor;
@@ -35,6 +37,8 @@ public class ChatHandler {
 	private final ConversationRepository conversationRepository;
 	private final MessageRepository messageRepository;
 	private final CustomerMerchantRepository customerMerchantRepository;
+	private final OrderRepository orderRepository;
+	private final WhatsAppSender whatsAppSender;
 
 	@Transactional
 	public void handle(String from, String text, String messageId) {
@@ -89,9 +93,15 @@ public class ChatHandler {
 		sender.sendText(from, aiResponse);
 	}
 
-	private void handleMerchantAction(String from, String action) {
+	private void handleMerchantAction(String from, String text) {
 		try {
-			String[] parts = action.split("_", 2);
+			// Payment confirmation
+			if (text.startsWith("payconfirm_") || text.startsWith("payreject_")) {
+				handlePaymentConfirmation(from, text);
+				return;
+			}
+
+			String[] parts = text.split("_", 2);
 			String type = parts[0];
 			UUID orderId = UUID.fromString(parts[1]);
 
@@ -105,6 +115,39 @@ public class ChatHandler {
 		} catch (Exception e) {
 			log.error("Error handling merchant action", e);
 			sender.sendText(from, "Sorry, couldn't process that action. Please try again.");
+		}
+	}
+
+	private void handlePaymentConfirmation(String from, String action) {
+		try {
+			String[] parts = action.split("_", 2);
+			String type = parts[0];
+			UUID orderId = UUID.fromString(parts[1]);
+
+			Order order = orderRepository.findById(orderId).orElse(null);
+			if (order == null)
+				return;
+
+			if ("payconfirm".equals(type)) {
+				order.setPaymentStatus("paid");
+				orderRepository.save(order);
+				sender.sendText(from, "✅ Payment confirmed for " + order.getOrderNumber() + "!");
+				// Notify customer
+				String customerPhone = order.getCustomer().getWhatsappPhone();
+				if (!customerPhone.startsWith("91"))
+					customerPhone = "91" + customerPhone;
+				sender.sendText(customerPhone,
+						"✅ Payment confirmed for *" + order.getOrderNumber() + "*! Your order is being prepared! 🎉");
+			} else {
+				sender.sendText(from, "Noted. Customer has been asked to retry payment.");
+				String customerPhone = order.getCustomer().getWhatsappPhone();
+				if (!customerPhone.startsWith("91"))
+					customerPhone = "91" + customerPhone;
+				sender.sendText(customerPhone, "⚠️ Payment for *" + order.getOrderNumber()
+						+ "* hasn't been received yet. Please retry or share a payment screenshot.");
+			}
+		} catch (Exception e) {
+			log.error("Error handling payment confirmation", e);
 		}
 	}
 

@@ -21,9 +21,11 @@ import com.botcommerce.model.Order;
 import com.botcommerce.model.Product;
 import com.botcommerce.repository.KnowledgeEntryRepository;
 import com.botcommerce.repository.MessageRepository;
+import com.botcommerce.repository.OrderRepository;
 import com.botcommerce.repository.ProductRepository;
 import com.botcommerce.service.CartService;
 import com.botcommerce.service.OrderService;
+import com.botcommerce.whatsapp.WhatsAppSender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -47,6 +49,8 @@ public class AiService {
 	private final MessageRepository messageRepository;
 	private final CartService cartService;
 	private final OrderService orderService;
+	private final OrderRepository orderRepository;
+	private final WhatsAppSender whatsAppSender;
 
 	public String generateResponse(Merchant merchant, Customer customer, Conversation conversation,
 			String userMessage) {
@@ -164,6 +168,29 @@ public class AiService {
 						+ order.getTotal().stripTrailingZeros().toPlainString()
 						+ (upiLink != null ? " | UPI: " + upiLink : "");
 			}
+			case "payment_done" -> {
+				// Find the latest order for this customer with this merchant
+				String merchantPhone = merchant.getWhatsappPhone();
+				if (merchantPhone != null && !merchantPhone.startsWith("91")) {
+					merchantPhone = "91" + merchantPhone;
+				}
+				// Find latest placed order
+				Order latestOrder = orderRepository
+						.findTopByCustomerIdAndMerchantIdOrderByCreatedAtDesc(customer.getId(), merchant.getId())
+						.orElse(null);
+				if (latestOrder == null) {
+					yield "No recent order found.";
+				}
+				if (merchantPhone != null) {
+					whatsAppSender.sendButtons(merchantPhone,
+							"💰 Customer says payment done for *" + latestOrder.getOrderNumber() + "* (₹"
+									+ latestOrder.getTotal().stripTrailingZeros().toPlainString()
+									+ "). Did you receive it?",
+							List.of(Map.of("id", "payconfirm_" + latestOrder.getId(), "title", "✅ Received"),
+									Map.of("id", "payreject_" + latestOrder.getId(), "title", "❌ Not Received")));
+				}
+				yield "Payment verification sent to shop owner for " + latestOrder.getOrderNumber();
+			}
 			case "none" -> null;
 			default -> null;
 			};
@@ -217,6 +244,7 @@ public class AiService {
 						{"action": "clear_cart"}
 						{"action": "view_cart"}
 						{"action": "place_order", "delivery_address": "...", "delivery_type": "delivery", "customer_note": "..."}
+						{"action": "payment_done", "order_number": "ORD-XXXXX"} — when customer says they've paid or payment is done
 						{"action": "none"} — for questions, greetings, or when no cart action is needed
 
 						RULES:
