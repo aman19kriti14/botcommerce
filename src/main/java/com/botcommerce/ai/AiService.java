@@ -1,34 +1,19 @@
 package com.botcommerce.ai;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.stream.Collectors;
-
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
-
-import com.botcommerce.model.Cart;
-import com.botcommerce.model.Conversation;
-import com.botcommerce.model.Customer;
-import com.botcommerce.model.KnowledgeEntry;
-import com.botcommerce.model.Merchant;
-import com.botcommerce.model.Message;
-import com.botcommerce.model.Order;
-import com.botcommerce.model.Product;
-import com.botcommerce.repository.KnowledgeEntryRepository;
-import com.botcommerce.repository.MessageRepository;
-import com.botcommerce.repository.ProductRepository;
+import com.botcommerce.model.*;
+import com.botcommerce.repository.*;
 import com.botcommerce.service.CartService;
 import com.botcommerce.service.OrderService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -51,26 +36,24 @@ public class AiService {
 	public String generateResponse(Merchant merchant, Customer customer, Conversation conversation,
 			String userMessage) {
 		try {
-			String systemPrompt = buildSystemPrompt(merchant, customer, conversation);
+			// Step 1: Ask AI to decide what action to take
+			String actionResponse = callAi(buildActionPrompt(merchant, customer),
+					buildMessages(conversation, userMessage));
+
+			// Step 2: Parse and execute action
+			String actionResult = executeAction(actionResponse, merchant, customer);
+
+			// Step 3: Generate user-friendly response
+			String systemPrompt = buildResponsePrompt(merchant, customer, actionResult);
 			List<Map<String, String>> messages = buildMessages(conversation, userMessage);
 
-			Map<String, Object> request = new HashMap<>();
-			request.put("model", model);
-			request.put("max_tokens", 800);
-			request.put("system", systemPrompt);
-			request.put("messages", messages);
-			request.put("tools", getTools());
+			if (actionResult != null) {
+				messages.add(Map.of("role", "assistant", "content", "[Action taken: " + actionResult + "]"));
+				messages.add(Map.of("role", "user", "content",
+						"Based on the action taken, respond to the customer naturally. Keep it short, 2-3 sentences max."));
+			}
 
-			String requestBody = objectMapper.writeValueAsString(request);
-
-			WebClient client = WebClient.builder().baseUrl("https://api.anthropic.com")
-					.defaultHeader("x-api-key", apiKey).defaultHeader("anthropic-version", "2023-06-01")
-					.defaultHeader("content-type", "application/json").build();
-
-			String response = client.post().uri("/v1/messages").bodyValue(requestBody).retrieve()
-					.bodyToMono(String.class).block();
-
-			return processResponse(response, merchant, customer, conversation);
+			return callAi(systemPrompt, messages);
 
 		} catch (Exception e) {
 			log.error("AI generation failed", e);
@@ -78,114 +61,9 @@ public class AiService {
 		}
 	}
 
-	private String processResponse(String response, Merchant merchant, Customer customer, Conversation conversation)
-			throws Exception {
-		JsonNode root = objectMapper.readTree(response);
-		JsonNode content = root.path("content");
-
-		StringBuilder textResponse = new StringBuilder();
-		List<Map<String, Object>> toolResults = new ArrayList<>();
-
-		for (JsonNode block : content) {
-			String type = block.path("type").asText();
-
-			if ("text".equals(type)) {
-				textResponse.append(block.path("text").asText());
-			} else if ("tool_use".equals(type)) {
-				String toolName = block.path("name").asText();
-				String toolId = block.path("id").asText();
-				JsonNode input = block.path("input");
-
-				String result = executeTool(toolName, input, merchant, customer);
-				toolResults.add(Map.of("type", "tool_result", "tool_use_id", toolId, "content", result));
-			}
-		}
-
-		// If there were tool calls, make a follow-up request with results
-		if (!toolResults.isEmpty()) {
-			return makeFollowUp(root, toolResults, merchant, customer, conversation);
-		}
-
-		return textResponse.toString();
-	}
-
-	private String executeTool(String toolName, JsonNode input, Merchant merchant, Customer customer) {
-		try {
-			return switch (toolName) {
-			case "add_to_cart" -> {
-				String productName = input.path("product_name").asText();
-				int qty = input.has("quantity") ? input.path("quantity").asInt() : 1;
-
-				Product product = findProductByName(merchant.getId(), productName);
-				if (product == null)
-					yield "Product not found: " + productName;
-
-				Cart cart = cartService.getOrCreateCart(customer, merchant);
-				CartService.CartSummary summary = cartService.addItem(cart, product.getId(), qty);
-				yield "Added " + qty + "x " + product.getName() + " to cart. " + summary.toDisplayString();
-			}
-			case "remove_from_cart" -> {
-				String productName = input.path("product_name").asText();
-				Product product = findProductByName(merchant.getId(), productName);
-				if (product == null)
-					yield "Product not found: " + productName;
-
-				Cart cart = cartService.getOrCreateCart(customer, merchant);
-				CartService.CartSummary summary = cartService.removeItem(cart, product.getId());
-				yield "Removed " + product.getName() + ". " + summary.toDisplayString();
-			}
-			case "view_cart" -> {
-				Cart cart = cartService.getOrCreateCart(customer, merchant);
-				CartService.CartSummary summary = cartService.getCartSummary(cart);
-				yield summary.toDisplayString();
-			}
-			case "place_order" -> {
-				String address = input.path("delivery_address").asText();
-				String type = input.has("delivery_type") ? input.path("delivery_type").asText() : "delivery";
-				String note = input.has("customer_note") ? input.path("customer_note").asText() : null;
-
-				Cart cart = cartService.getOrCreateCart(customer, merchant);
-				Order order = orderService.createOrder(cart, customer, merchant, address, type, note);
-
-				String upiLink = merchant.getUpiId() != null
-						? "upi://pay?pa=" + merchant.getUpiId() + "&am=" + order.getTotal().toPlainString()
-								+ "&tn=Order " + order.getOrderNumber()
-						: "UPI ID not set";
-
-				yield "Order " + order.getOrderNumber() + " placed! Total: ₹"
-						+ order.getTotal().stripTrailingZeros().toPlainString() + ". Payment link: " + upiLink;
-			}
-			default -> "Unknown action";
-			};
-		} catch (Exception e) {
-			log.error("Tool execution failed: {}", toolName, e);
-			return "Error: " + e.getMessage();
-		}
-	}
-
-	private String makeFollowUp(JsonNode originalResponse, List<Map<String, Object>> toolResults, Merchant merchant,
-			Customer customer, Conversation conversation) throws Exception {
-		// Build follow-up messages
-		List<Map<String, Object>> messages = new ArrayList<>();
-
-		// Add conversation history
-		List<Message> recent = messageRepository.findRecentByConversationId(conversation.getId(), 10);
-		for (Message m : recent) {
-			String role = "customer".equals(m.getSenderType()) ? "user" : "assistant";
-			messages.add(Map.of("role", role, "content", m.getContent()));
-		}
-
-		// Add assistant response with tool use
-		messages.add(Map.of("role", "assistant", "content", originalResponse.path("content")));
-
-		// Add tool results
-		messages.add(Map.of("role", "user", "content", toolResults));
-
-		Map<String, Object> request = new HashMap<>();
-		request.put("model", model);
-		request.put("max_tokens", 500);
-		request.put("system", buildSystemPrompt(merchant, customer, conversation));
-		request.put("messages", messages);
+	private String callAi(String systemPrompt, List<Map<String, String>> messages) throws Exception {
+		Map<String, Object> request = Map.of("model", model, "max_tokens", 400, "system", systemPrompt, "messages",
+				messages);
 
 		String requestBody = objectMapper.writeValueAsString(request);
 
@@ -200,6 +78,92 @@ public class AiService {
 		return root.path("content").get(0).path("text").asText();
 	}
 
+	private String executeAction(String aiResponse, Merchant merchant, Customer customer) {
+		try {
+			// Extract JSON action from response
+			String json = extractJson(aiResponse);
+			if (json == null)
+				return null;
+
+			JsonNode action = objectMapper.readTree(json);
+			String type = action.path("action").asText();
+
+			Cart cart = cartService.getOrCreateCart(customer, merchant);
+
+			return switch (type) {
+			case "add_to_cart" -> {
+				String productName = action.path("product_name").asText();
+				int qty = action.has("quantity") ? action.path("quantity").asInt() : 1;
+				Product product = findProductByName(merchant.getId(), productName);
+				if (product == null)
+					yield "Product not found: " + productName;
+				CartService.CartSummary summary = cartService.addItem(cart, product.getId(), qty);
+				yield "Added " + qty + "x " + product.getName() + ". " + summary.toDisplayString();
+			}
+			case "set_quantity" -> {
+				String productName = action.path("product_name").asText();
+				int qty = action.path("quantity").asInt();
+				Product product = findProductByName(merchant.getId(), productName);
+				if (product == null)
+					yield "Product not found: " + productName;
+				// Remove existing and add with correct quantity
+				cartService.removeItem(cart, product.getId());
+				if (qty > 0) {
+					CartService.CartSummary summary = cartService.addItem(cart, product.getId(), qty);
+					yield "Set " + product.getName() + " to " + qty + ". " + summary.toDisplayString();
+				} else {
+					CartService.CartSummary summary = cartService.getCartSummary(cart);
+					yield "Removed " + product.getName() + ". " + summary.toDisplayString();
+				}
+			}
+			case "remove_from_cart" -> {
+				String productName = action.path("product_name").asText();
+				Product product = findProductByName(merchant.getId(), productName);
+				if (product == null)
+					yield "Product not found: " + productName;
+				CartService.CartSummary summary = cartService.removeItem(cart, product.getId());
+				yield "Removed " + product.getName() + ". " + summary.toDisplayString();
+			}
+			case "clear_cart" -> {
+				CartService.CartSummary summary = cartService.clearCart(cart);
+				yield "Cart cleared. " + summary.toDisplayString();
+			}
+			case "view_cart" -> {
+				CartService.CartSummary summary = cartService.getCartSummary(cart);
+				yield summary.toDisplayString();
+			}
+			case "place_order" -> {
+				String address = action.path("delivery_address").asText();
+				String deliveryType = action.has("delivery_type") ? action.path("delivery_type").asText() : "delivery";
+				String note = action.has("customer_note") ? action.path("customer_note").asText() : null;
+				Order order = orderService.createOrder(cart, customer, merchant, address, deliveryType, note);
+				String upiLink = merchant.getUpiId() != null
+						? "upi://pay?pa=" + merchant.getUpiId() + "&am=" + order.getTotal().toPlainString()
+								+ "&tn=Order+" + order.getOrderNumber()
+						: null;
+				yield "Order placed! " + order.getOrderNumber() + " | Total: ₹"
+						+ order.getTotal().stripTrailingZeros().toPlainString()
+						+ (upiLink != null ? " | UPI: " + upiLink : "");
+			}
+			case "none" -> null;
+			default -> null;
+			};
+		} catch (Exception e) {
+			log.error("Action execution failed: {}", e.getMessage());
+			return null;
+		}
+	}
+
+	private String extractJson(String text) {
+		// Find JSON block in response
+		int start = text.indexOf("{");
+		int end = text.lastIndexOf("}");
+		if (start != -1 && end != -1 && end > start) {
+			return text.substring(start, end + 1);
+		}
+		return null;
+	}
+
 	private Product findProductByName(UUID merchantId, String name) {
 		List<Product> products = productRepository.findAvailableByMerchantId(merchantId);
 		String lower = name.toLowerCase();
@@ -208,32 +172,46 @@ public class AiService {
 				.findFirst().orElse(null);
 	}
 
-	private List<Object> getTools() {
-		return List.of(Map.of("name", "add_to_cart", "description",
-				"Add a product to the customer's cart. Use when customer wants to order something.", "input_schema",
-				Map.of("type", "object", "properties",
-						Map.of("product_name", Map.of("type", "string", "description", "Name of the product to add"),
-								"quantity", Map.of("type", "integer", "description", "Quantity to add, default 1")),
-						"required", List.of("product_name"))),
-				Map.of("name", "remove_from_cart", "description", "Remove a product from the cart.", "input_schema",
-						Map.of("type", "object", "properties",
-								Map.of("product_name",
-										Map.of("type", "string", "description", "Name of the product to remove")),
-								"required", List.of("product_name"))),
-				Map.of("name", "view_cart", "description",
-						"Show the current cart contents. Use when customer asks to see their cart or wants to review before ordering.",
-						"input_schema", Map.of("type", "object", "properties", Map.of())),
-				Map.of("name", "place_order", "description",
-						"Place the order. Use ONLY when customer has confirmed items AND provided a delivery address.",
-						"input_schema",
-						Map.of("type", "object", "properties", Map.of("delivery_address",
-								Map.of("type", "string", "description", "Customer's delivery address"), "delivery_type",
-								Map.of("type", "string", "enum", List.of("delivery", "pickup")), "customer_note",
-								Map.of("type", "string", "description", "Any special instructions")), "required",
-								List.of("delivery_address"))));
+	private String buildActionPrompt(Merchant merchant, Customer customer) {
+		List<Product> products = productRepository.findAvailableByMerchantId(merchant.getId());
+		String catalog = products.stream()
+				.map(p -> p.getName() + ": ₹" + p.getPrice().stripTrailingZeros().toPlainString())
+				.collect(Collectors.joining(", "));
+
+		Cart cart = cartService.getOrCreateCart(customer, merchant);
+		String cartText = cartService.getCartSummary(cart).toDisplayString();
+
+		return String.format(
+				"""
+						You are an action parser for a WhatsApp shopping bot for "%s".
+
+						Products: %s
+						Current cart: %s
+
+						Based on the customer's message, respond with ONLY a JSON object for the action to take.
+						No other text, just the JSON.
+
+						Available actions:
+						{"action": "add_to_cart", "product_name": "...", "quantity": 1}
+						{"action": "set_quantity", "product_name": "...", "quantity": 1}  — use when customer wants to change quantity, e.g. "only 1", "make it 2"
+						{"action": "remove_from_cart", "product_name": "..."}
+						{"action": "clear_cart"}
+						{"action": "view_cart"}
+						{"action": "place_order", "delivery_address": "...", "delivery_type": "delivery", "customer_note": "..."}
+						{"action": "none"} — for questions, greetings, or when no cart action is needed
+
+						RULES:
+						- If customer mentions a product by name or number and seems to want it, use add_to_cart.
+						- If they say "only 1" or "just 1" or "sirf ek", use set_quantity with quantity 1.
+						- If they provide an address and want to order, use place_order.
+						- If they just ask a question or say hi, use "none".
+						- If customer says a number (1, 2, 3, 4), match it to the product list order.
+						- Respond with ONLY the JSON. Nothing else.
+						""",
+				merchant.getBusinessName(), catalog, cartText);
 	}
 
-	private String buildSystemPrompt(Merchant merchant, Customer customer, Conversation conversation) {
+	private String buildResponsePrompt(Merchant merchant, Customer customer, String actionResult) {
 		List<Product> products = productRepository.findAvailableByMerchantId(merchant.getId());
 		String catalog = products.stream()
 				.map(p -> String.format("- %s: ₹%s%s%s", p.getName(), p.getPrice().stripTrailingZeros().toPlainString(),
@@ -249,61 +227,38 @@ public class AiService {
 		Cart cart = cartService.getOrCreateCart(customer, merchant);
 		String cartText = cartService.getCartSummary(cart).toDisplayString();
 
-		return String.format(
-				"""
-						You are the AI shopping assistant for "%s", a %s business in %s.
-						Personality: %s tone, speak in %s.
+		return String.format("""
+				You are the friendly AI assistant for "%s", a %s business in %s.
+				Tone: %s. Language: %s.
 
-						PRODUCT CATALOG:
-						%s
+				CATALOG:
+				%s
 
-						BUSINESS KNOWLEDGE:
-						%s
+				KNOWLEDGE:
+				%s
 
-						Delivery areas: %s
-						Minimum order: ₹%s
-						Delivery fee: ₹%s
+				CURRENT CART: %s
+				DELIVERY FEE: ₹%s
 
-						CURRENT CART:
-						%s
+				%s
 
-						CUSTOM RULES:
-						%s
-
-						CRITICAL FORMATTING RULES:
-						- This is WhatsApp. NEVER use markdown tables, headers with ##, or bullet points with -.
-						- Use simple text with emojis. List items with numbers or emojis on new lines.
-						- Keep responses to 2-3 sentences MAX. Be concise.
-						- Use *bold* only for product names and prices.
-
-						CART MANAGEMENT RULES:
-						- Use add_to_cart when customer clearly wants to buy/order something.
-						- Do NOT add to cart just because customer says a product name — they might just be asking about it.
-						- If customer says "only one" or "just one" and cart has more, use remove_from_cart then add_to_cart with qty 1.
-						- If customer says "remove" or "hatao" or "nahi chahiye", use remove_from_cart.
-						- Always confirm what was added and show the updated total.
-
-						ORDER RULES:
-						- Use place_order ONLY when customer has confirmed items AND provided delivery address.
-						- Ask for delivery address before placing order.
-						- After order is placed, the cart is emptied. If customer says "payment done", acknowledge it and say the shop owner will confirm soon.
-						- NEVER re-ask for items or address after an order is already placed in this conversation.
-
-						LANGUAGE:
-						- If customer writes in Hindi, reply in Hindi/Hinglish.
-						- NEVER make up products or prices not in the catalog.
-						- If asked about something not in your knowledge, say you'll check with the shop owner.
-						""",
-				merchant.getBusinessName(), merchant.getCategory() != null ? merchant.getCategory() : "general",
+				RULES:
+				- This is WhatsApp. NEVER use markdown tables, headers, or bullet points.
+				- Keep responses to 2-3 sentences MAX.
+				- Use *bold* for product names and prices only.
+				- Use emojis naturally but sparingly.
+				- If customer speaks Hindi, reply in Hindi/Hinglish.
+				- NEVER make up products or prices.
+				- If an order was just placed, include the order number and payment link.
+				- If customer says "payment done", say thanks and that the shop will confirm shortly.
+				- After placing order, do NOT ask for items or address again.
+				""", merchant.getBusinessName(), merchant.getCategory() != null ? merchant.getCategory() : "general",
 				merchant.getCity() != null ? merchant.getCity() : "India",
 				merchant.getBotTone() != null ? merchant.getBotTone() : "friendly",
 				merchant.getBotLanguage() != null ? merchant.getBotLanguage() : "English",
-				catalog.isEmpty() ? "No products added yet" : catalog,
-				knowledgeText.isEmpty() ? "No additional info" : knowledgeText,
-				merchant.getDeliveryAreas() != null ? merchant.getDeliveryAreas() : "Not specified",
-				merchant.getMinOrderAmount().stripTrailingZeros().toPlainString(),
-				merchant.getDeliveryFee().stripTrailingZeros().toPlainString(), cartText,
-				merchant.getBotRules() != null ? merchant.getBotRules() : "None");
+				catalog.isEmpty() ? "No products yet" : catalog, knowledgeText.isEmpty() ? "None" : knowledgeText,
+				cartText, merchant.getDeliveryFee().stripTrailingZeros().toPlainString(),
+				actionResult != null ? "LAST ACTION RESULT: " + actionResult : "");
 	}
 
 	private List<Map<String, String>> buildMessages(Conversation conversation, String userMessage) {
@@ -312,9 +267,9 @@ public class AiService {
 		List<Map<String, String>> messages = new ArrayList<>();
 		for (Message m : recent) {
 			String role = "customer".equals(m.getSenderType()) ? "user" : "assistant";
-			messages.add(Map.of("role", role, "content", m.getContent()));
+			messages.add(new HashMap<>(Map.of("role", role, "content", m.getContent())));
 		}
-		messages.add(Map.of("role", "user", "content", userMessage));
+		messages.add(new HashMap<>(Map.of("role", "user", "content", userMessage)));
 
 		return messages;
 	}
