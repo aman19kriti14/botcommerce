@@ -1,0 +1,777 @@
+databaseChangeLog:
+
+  # ========== MERCHANTS ==========
+  - changeSet:
+      id: 001-create-merchants
+      author: aman
+      changes:
+        - createTable:
+            tableName: merchants
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: phone
+                  type: varchar(15)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: password_hash
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: business_name
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: slug
+                  type: varchar(100)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: category
+                  type: varchar(50)
+                  remarks: "food, fashion, services, electronics, grocery, other"
+              - column:
+                  name: description
+                  type: text
+              - column:
+                  name: city
+                  type: varchar(100)
+              - column:
+                  name: address
+                  type: text
+              - column:
+                  name: logo_url
+                  type: varchar(500)
+              - column:
+                  name: upi_id
+                  type: varchar(100)
+              - column:
+                  name: whatsapp_phone
+                  type: varchar(15)
+                  remarks: "Merchant's personal WhatsApp for order notifications"
+              - column:
+                  name: bot_tone
+                  type: varchar(20)
+                  defaultValue: friendly
+                  remarks: "friendly, professional, casual"
+              - column:
+                  name: bot_language
+                  type: varchar(20)
+                  defaultValue: english
+                  remarks: "english, hindi, hinglish"
+              - column:
+                  name: bot_rules
+                  type: text
+                  remarks: "Custom rules like 'always upsell desserts', stored as text"
+              - column:
+                  name: operating_hours
+                  type: jsonb
+                  remarks: '{"mon": {"open": "09:00", "close": "21:00"}, ...}'
+              - column:
+                  name: delivery_areas
+                  type: text
+              - column:
+                  name: min_order_amount
+                  type: decimal(10,2)
+                  defaultValueNumeric: 0
+              - column:
+                  name: delivery_fee
+                  type: decimal(10,2)
+                  defaultValueNumeric: 0
+              - column:
+                  name: wallet_balance
+                  type: decimal(10,2)
+                  defaultValueNumeric: 0
+              - column:
+                  name: free_orders_remaining
+                  type: int
+                  defaultValueNumeric: 100
+              - column:
+                  name: is_active
+                  type: boolean
+                  defaultValueBoolean: true
+              - column:
+                  name: is_online
+                  type: boolean
+                  defaultValueBoolean: true
+              - column:
+                  name: total_orders
+                  type: int
+                  defaultValueNumeric: 0
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== PRODUCT CATEGORIES ==========
+  - changeSet:
+      id: 001-create-product-categories
+      author: aman
+      changes:
+        - createTable:
+            tableName: product_categories
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_category_merchant
+              - column:
+                  name: name
+                  type: varchar(100)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: sort_order
+                  type: int
+                  defaultValueNumeric: 0
+              - column:
+                  name: is_active
+                  type: boolean
+                  defaultValueBoolean: true
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== PRODUCTS ==========
+  - changeSet:
+      id: 001-create-products
+      author: aman
+      changes:
+        - createTable:
+            tableName: products
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_product_merchant
+              - column:
+                  name: category_id
+                  type: uuid
+                  constraints:
+                    references: product_categories(id)
+                    foreignKeyName: fk_product_category
+              - column:
+                  name: name
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: description
+                  type: text
+              - column:
+                  name: price
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: compare_at_price
+                  type: decimal(10,2)
+                  remarks: "Original price for showing discounts"
+              - column:
+                  name: image_url
+                  type: varchar(500)
+              - column:
+                  name: is_available
+                  type: boolean
+                  defaultValueBoolean: true
+              - column:
+                  name: sort_order
+                  type: int
+                  defaultValueNumeric: 0
+              - column:
+                  name: tags
+                  type: varchar(500)
+                  remarks: "Comma-separated: eggless,bestseller,new"
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== CUSTOMERS ==========
+  - changeSet:
+      id: 001-create-customers
+      author: aman
+      changes:
+        - createTable:
+            tableName: customers
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: whatsapp_phone
+                  type: varchar(15)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: name
+                  type: varchar(255)
+              - column:
+                  name: last_address
+                  type: text
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+        - addUniqueConstraint:
+            tableName: customers
+            columnNames: whatsapp_phone
+            constraintName: uq_customer_phone
+
+  # ========== CUSTOMER-MERCHANT LINK ==========
+  - changeSet:
+      id: 001-create-customer-merchant
+      author: aman
+      changes:
+        - createTable:
+            tableName: customer_merchants
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: customer_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: customers(id)
+                    foreignKeyName: fk_cm_customer
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_cm_merchant
+              - column:
+                  name: total_orders
+                  type: int
+                  defaultValueNumeric: 0
+              - column:
+                  name: total_spent
+                  type: decimal(10,2)
+                  defaultValueNumeric: 0
+              - column:
+                  name: last_order_at
+                  type: timestamp with time zone
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+        - addUniqueConstraint:
+            tableName: customer_merchants
+            columnNames: customer_id, merchant_id
+            constraintName: uq_customer_merchant
+
+  # ========== CARTS ==========
+  - changeSet:
+      id: 001-create-carts
+      author: aman
+      changes:
+        - createTable:
+            tableName: carts
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: customer_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: customers(id)
+                    foreignKeyName: fk_cart_customer
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_cart_merchant
+              - column:
+                  name: status
+                  type: varchar(20)
+                  defaultValue: active
+                  remarks: "active, converted, abandoned"
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== CART ITEMS ==========
+  - changeSet:
+      id: 001-create-cart-items
+      author: aman
+      changes:
+        - createTable:
+            tableName: cart_items
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: cart_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: carts(id)
+                    foreignKeyName: fk_cartitem_cart
+              - column:
+                  name: product_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: products(id)
+                    foreignKeyName: fk_cartitem_product
+              - column:
+                  name: quantity
+                  type: int
+                  defaultValueNumeric: 1
+              - column:
+                  name: unit_price
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== ORDERS ==========
+  - changeSet:
+      id: 001-create-orders
+      author: aman
+      changes:
+        - createTable:
+            tableName: orders
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: order_number
+                  type: varchar(20)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_order_merchant
+              - column:
+                  name: customer_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: customers(id)
+                    foreignKeyName: fk_order_customer
+              - column:
+                  name: status
+                  type: varchar(30)
+                  defaultValue: pending_payment
+                  remarks: "pending_payment, placed, accepted, preparing, ready, out_for_delivery, delivered, cancelled, rejected"
+              - column:
+                  name: subtotal
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: delivery_fee
+                  type: decimal(10,2)
+                  defaultValueNumeric: 0
+              - column:
+                  name: total
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: payment_method
+                  type: varchar(20)
+                  defaultValue: upi
+                  remarks: "upi, cod"
+              - column:
+                  name: payment_status
+                  type: varchar(20)
+                  defaultValue: pending
+                  remarks: "pending, paid, refunded"
+              - column:
+                  name: delivery_address
+                  type: text
+              - column:
+                  name: delivery_type
+                  type: varchar(20)
+                  defaultValue: delivery
+                  remarks: "delivery, pickup"
+              - column:
+                  name: customer_note
+                  type: text
+              - column:
+                  name: rejection_reason
+                  type: text
+              - column:
+                  name: platform_fee
+                  type: decimal(10,2)
+                  defaultValueNumeric: 5.00
+              - column:
+                  name: placed_at
+                  type: timestamp with time zone
+              - column:
+                  name: accepted_at
+                  type: timestamp with time zone
+              - column:
+                  name: delivered_at
+                  type: timestamp with time zone
+              - column:
+                  name: cancelled_at
+                  type: timestamp with time zone
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+              - column:
+                  name: updated_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== ORDER ITEMS ==========
+  - changeSet:
+      id: 001-create-order-items
+      author: aman
+      changes:
+        - createTable:
+            tableName: order_items
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: order_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: orders(id)
+                    foreignKeyName: fk_orderitem_order
+              - column:
+                  name: product_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: products(id)
+                    foreignKeyName: fk_orderitem_product
+              - column:
+                  name: product_name
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: quantity
+                  type: int
+                  constraints:
+                    nullable: false
+              - column:
+                  name: unit_price
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: total_price
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+
+  # ========== KNOWLEDGE BASE ==========
+  - changeSet:
+      id: 001-create-knowledge-base
+      author: aman
+      changes:
+        - createTable:
+            tableName: knowledge_entries
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_knowledge_merchant
+              - column:
+                  name: type
+                  type: varchar(30)
+                  remarks: "faq, policy, info, custom"
+              - column:
+                  name: question
+                  type: text
+                  remarks: "The question or topic"
+              - column:
+                  name: answer
+                  type: text
+                  constraints:
+                    nullable: false
+                  remarks: "The knowledge content"
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== CONVERSATIONS (for AI context) ==========
+  - changeSet:
+      id: 001-create-conversations
+      author: aman
+      changes:
+        - createTable:
+            tableName: conversations
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: customer_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: customers(id)
+                    foreignKeyName: fk_conv_customer
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_conv_merchant
+              - column:
+                  name: status
+                  type: varchar(20)
+                  defaultValue: active
+                  remarks: "active, closed, handed_off"
+              - column:
+                  name: last_message_at
+                  type: timestamp with time zone
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  - changeSet:
+      id: 001-create-messages
+      author: aman
+      changes:
+        - createTable:
+            tableName: messages
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: conversation_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: conversations(id)
+                    foreignKeyName: fk_msg_conversation
+              - column:
+                  name: sender_type
+                  type: varchar(20)
+                  constraints:
+                    nullable: false
+                  remarks: "customer, bot, merchant"
+              - column:
+                  name: content
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: message_type
+                  type: varchar(20)
+                  defaultValue: text
+                  remarks: "text, image, product_card, cart_summary, payment_link"
+              - column:
+                  name: wa_message_id
+                  type: varchar(100)
+              - column:
+                  name: metadata
+                  type: jsonb
+                  remarks: "Extra data like product IDs, intent classification, etc."
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== WALLET TRANSACTIONS ==========
+  - changeSet:
+      id: 001-create-wallet-transactions
+      author: aman
+      changes:
+        - createTable:
+            tableName: wallet_transactions
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  defaultValueComputed: gen_random_uuid()
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: merchant_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    references: merchants(id)
+                    foreignKeyName: fk_wallet_merchant
+              - column:
+                  name: type
+                  type: varchar(20)
+                  constraints:
+                    nullable: false
+                  remarks: "credit, debit"
+              - column:
+                  name: amount
+                  type: decimal(10,2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: description
+                  type: varchar(255)
+              - column:
+                  name: order_id
+                  type: uuid
+                  constraints:
+                    references: orders(id)
+                    foreignKeyName: fk_wallet_order
+              - column:
+                  name: balance_after
+                  type: decimal(10,2)
+              - column:
+                  name: created_at
+                  type: timestamp with time zone
+                  defaultValueComputed: now()
+
+  # ========== INDEXES ==========
+  - changeSet:
+      id: 001-create-indexes
+      author: aman
+      changes:
+        - createIndex:
+            tableName: products
+            indexName: idx_products_merchant
+            columns:
+              - column: { name: merchant_id }
+        - createIndex:
+            tableName: products
+            indexName: idx_products_category
+            columns:
+              - column: { name: category_id }
+        - createIndex:
+            tableName: orders
+            indexName: idx_orders_merchant
+            columns:
+              - column: { name: merchant_id }
+        - createIndex:
+            tableName: orders
+            indexName: idx_orders_customer
+            columns:
+              - column: { name: customer_id }
+        - createIndex:
+            tableName: orders
+            indexName: idx_orders_status
+            columns:
+              - column: { name: status }
+        - createIndex:
+            tableName: messages
+            indexName: idx_messages_conversation
+            columns:
+              - column: { name: conversation_id }
+        - createIndex:
+            tableName: conversations
+            indexName: idx_conversations_customer_merchant
+            columns:
+              - column: { name: customer_id }
+              - column: { name: merchant_id }
+        - createIndex:
+            tableName: carts
+            indexName: idx_carts_customer_merchant
+            columns:
+              - column: { name: customer_id }
+              - column: { name: merchant_id }
+        - createIndex:
+            tableName: knowledge_entries
+            indexName: idx_knowledge_merchant
+            columns:
+              - column: { name: merchant_id }

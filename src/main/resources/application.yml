@@ -1,0 +1,58 @@
+spring:
+  application:
+    name: botcommerce
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:botcommerce}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    show-sql: false
+    open-in-view: false
+
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+server:
+  port: ${PORT:8080}
+
+whatsapp:
+  api-url: https://graph.facebook.com/v20.0
+  phone-number-id: ${WA_PHONE_NUMBER_ID}
+  access-token: ${WA_ACCESS_TOKEN}
+  verify-token: ${WA_VERIFY_TOKEN}
+  webhook-secret: ${WA_WEBHOOK_SECRET:}
+
+ai:
+  provider: ${AI_PROVIDER:anthropic}
+  api-key: ${AI_API_KEY}
+  model: ${AI_MODEL:claude-sonnet-4-6}
+
+jwt:
+  secret: ${JWT_SECRET:your-256-bit-secret-key-change-in-production}
+  expiration-ms: 86400000
+
+aws:
+  s3:
+    bucket: ${S3_BUCKET:botcommerce-assets}
+    region: ${AWS_REGION:ap-south-1}
+
+app:
+  base-url: ${APP_BASE_URL:http://localhost:8080}
+  frontend-url: ${FRONTEND_URL:http://localhost:5173}
+  storefront-url: ${STOREFRONT_URL:http://localhost:5174}
