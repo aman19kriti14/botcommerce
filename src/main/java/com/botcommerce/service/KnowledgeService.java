@@ -1,302 +1,326 @@
 package com.botcommerce.service;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
-import com.botcommerce.dto.KnowledgeDTO.KnowledgeContext;
-import com.botcommerce.dto.KnowledgeDTO.SourceResponse;
-import com.botcommerce.dto.KnowledgeDTO.StatsResponse;
-import com.botcommerce.model.KnowledgeChunk;
+import com.botcommerce.model.KnowledgeEntry;
 import com.botcommerce.model.KnowledgeSource;
-import com.botcommerce.model.KnowledgeSource.SourceStatus;
-import com.botcommerce.model.KnowledgeSource.SourceType;
-import com.botcommerce.repository.KnowledgeChunkRepository;
+import com.botcommerce.model.Merchant;
+import com.botcommerce.repository.KnowledgeEntryRepository;
 import com.botcommerce.repository.KnowledgeSourceRepository;
+import com.botcommerce.repository.MerchantRepository;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Service
+@RequiredArgsConstructor
+@Slf4j
 public class KnowledgeService {
 
-    private static final Logger log = LoggerFactory.getLogger(KnowledgeService.class);
+	private final KnowledgeSourceRepository sourceRepository;
+	private final KnowledgeEntryRepository entryRepository;
+	private final MerchantRepository merchantRepository;
 
-    private final KnowledgeSourceRepository sourceRepo;
-    private final KnowledgeChunkRepository chunkRepo;
-    private final TextExtractorService extractor;
+	// ── Get all sources ──
+	public List<Map<String, Object>> getSources(UUID merchantId) {
+		return sourceRepository.findByMerchantIdOrderByCreatedAtDesc(merchantId).stream().map(this::sourceToMap)
+				.toList();
+	}
 
-    public KnowledgeService(KnowledgeSourceRepository sourceRepo,
-                            KnowledgeChunkRepository chunkRepo,
-                            TextExtractorService extractor) {
-        this.sourceRepo = sourceRepo;
-        this.chunkRepo = chunkRepo;
-        this.extractor = extractor;
-    }
+	// ── Get stats ──
+	public Map<String, Object> getStats(UUID merchantId) {
+		List<KnowledgeSource> sources = sourceRepository.findByMerchantIdOrderByCreatedAtDesc(merchantId);
+		List<KnowledgeEntry> entries = entryRepository.findByMerchantId(merchantId);
+		int totalChars = sources.stream().mapToInt(s -> s.getCharCount() != null ? s.getCharCount() : 0).sum();
 
-    // ──────────────── Queries ────────────────
+		return Map.of("totalSources", sources.size(), "totalEntries", entries.size(), "totalChars", totalChars,
+				"fileCount", sources.stream().filter(s -> "file".equals(s.getType())).count(), "websiteCount",
+				sources.stream().filter(s -> "website".equals(s.getType())).count(), "textCount",
+				sources.stream().filter(s -> "text".equals(s.getType())).count());
+	}
 
-    public List<SourceResponse> getSources(Long merchantId) {
-        return sourceRepo.findByMerchantIdOrderByCreatedAtDesc(merchantId)
-            .stream()
-            .map(SourceResponse::from)
-            .toList();
-    }
+	// ── Upload file ──
+	@Transactional
+	public Map<String, Object> uploadFile(UUID merchantId, MultipartFile file) {
+		Merchant merchant = merchantRepository.findById(merchantId).orElseThrow();
 
-    public StatsResponse getStats(Long merchantId) {
-        List<KnowledgeSource> all = sourceRepo.findByMerchantIdOrderByCreatedAtDesc(merchantId);
-        int ready = sourceRepo.countReadyByMerchantId(merchantId);
-        int chunks = sourceRepo.totalChunksByMerchantId(merchantId);
-        int chars = sourceRepo.totalCharsByMerchantId(merchantId);
+		KnowledgeSource source = KnowledgeSource.builder().merchant(merchant).type("file")
+				.name(file.getOriginalFilename()).fileName(file.getOriginalFilename()).status("processing").build();
+		source = sourceRepository.save(source);
 
-        var lastUpdated = all.stream()
-            .map(KnowledgeSource::getUpdatedAt)
-            .max(java.time.LocalDateTime::compareTo)
-            .orElse(null);
+		try {
+			String content = extractFileContent(file);
+			source.setContent(content);
+			source.setCharCount(content.length());
+			source.setStatus("ready");
 
-        return new StatsResponse(all.size(), ready, chunks, chars, lastUpdated);
-    }
+			// Create knowledge entries from content
+			List<String> chunks = chunkText(content, 500);
+			source.setChunksCount(chunks.size());
 
-    // ──────────────── File Upload ────────────────
+			for (int i = 0; i < chunks.size(); i++) {
+				KnowledgeEntry entry = KnowledgeEntry.builder().merchant(merchant).type("file")
+						.question(file.getOriginalFilename() + " (part " + (i + 1) + ")").answer(chunks.get(i)).build();
+				entryRepository.save(entry);
+			}
 
-    @Transactional
-    public SourceResponse uploadFile(Long merchantId, MultipartFile file) {
-        KnowledgeSource source = new KnowledgeSource();
-        source.setMerchantId(merchantId);
-        source.setType(SourceType.FILE);
-        source.setName(file.getOriginalFilename());
-        source.setOriginalFilename(file.getOriginalFilename());
-        source.setFileSize(file.getSize());
-        source.setContentType(file.getContentType());
-        source.setStatus(SourceStatus.PROCESSING);
-        source = sourceRepo.save(source);
+			sourceRepository.save(source);
+			return sourceToMap(source);
 
-        // Process synchronously for now (can make async later)
-        processFile(source.getId(), file);
+		} catch (Exception e) {
+			log.error("File processing failed: {}", e.getMessage());
+			source.setStatus("failed");
+			source.setErrorMessage(e.getMessage());
+			sourceRepository.save(source);
+			return sourceToMap(source);
+		}
+	}
 
-        return SourceResponse.from(sourceRepo.findById(source.getId()).orElseThrow());
-    }
+	// ── Crawl website ──
+	@Transactional
+	public Map<String, Object> crawlWebsite(UUID merchantId, String url, int maxPages) {
+		Merchant merchant = merchantRepository.findById(merchantId).orElseThrow();
 
-    private void processFile(Long sourceId, MultipartFile file) {
-        KnowledgeSource source = sourceRepo.findById(sourceId).orElseThrow();
-        try {
-            // 1. Extract text
-            String text = extractor.extractFromFile(file);
-            source.setExtractedText(text);
-            source.setCharCount(text.length());
+		KnowledgeSource source = KnowledgeSource.builder().merchant(merchant).type("website").name(url).url(url)
+				.status("processing").build();
+		source = sourceRepository.save(source);
 
-            // 2. Chunk the text
-            List<String> chunks = extractor.chunkText(text);
-            source.setChunkCount(chunks.size());
+		try {
+			StringBuilder allContent = new StringBuilder();
+			Set<String> visited = new HashSet<>();
+			Queue<String> toVisit = new LinkedList<>();
+			toVisit.add(normalizeUrl(url));
 
-            // 3. Save chunks
-            for (int i = 0; i < chunks.size(); i++) {
-                KnowledgeChunk chunk = new KnowledgeChunk();
-                chunk.setKnowledgeSource(source);
-                chunk.setMerchantId(source.getMerchantId());
-                chunk.setChunkIndex(i);
-                chunk.setContent(chunks.get(i));
-                chunk.setCharCount(chunks.get(i).length());
-                source.getChunks().add(chunk);
-            }
+			String baseDomain = extractDomain(url);
+			int pagesCrawled = 0;
 
-            source.setStatus(SourceStatus.READY);
-            log.info("File processed: {} → {} chunks", source.getName(), chunks.size());
+			while (!toVisit.isEmpty() && pagesCrawled < maxPages) {
+				String currentUrl = toVisit.poll();
+				if (visited.contains(currentUrl))
+					continue;
+				visited.add(currentUrl);
 
-        } catch (Exception e) {
-            log.error("Failed to process file {}: {}", source.getName(), e.getMessage());
-            source.setStatus(SourceStatus.FAILED);
-            source.setErrorMessage(e.getMessage());
-        }
-        sourceRepo.save(source);
-    }
+				try {
+					Document doc = Jsoup.connect(currentUrl).userAgent("BotCommerce/1.0").timeout(10000).get();
 
-    // ──────────────── Website Crawl ────────────────
+					// Extract text
+					String title = doc.title();
+					String bodyText = doc.body().text();
 
-    @Transactional
-    public SourceResponse crawlWebsite(Long merchantId, String url, int maxPages) {
-        // Normalize URL
-        if (!url.startsWith("http")) url = "https://" + url;
+					if (!bodyText.isBlank()) {
+						allContent.append("--- Page: ").append(title).append(" ---\n");
+						allContent.append(bodyText).append("\n\n");
+						pagesCrawled++;
+					}
 
-        KnowledgeSource source = new KnowledgeSource();
-        source.setMerchantId(merchantId);
-        source.setType(SourceType.WEBSITE);
-        source.setName(extractDomain(url));
-        source.setSourceUrl(url);
-        source.setStatus(SourceStatus.PROCESSING);
-        source = sourceRepo.save(source);
+					// Find more links on same domain
+					if (pagesCrawled < maxPages) {
+						Elements links = doc.select("a[href]");
+						for (Element link : links) {
+							String href = link.absUrl("href");
+							if (href.contains(baseDomain) && !visited.contains(href) && !href.contains("#")
+									&& !href.endsWith(".pdf") && !href.endsWith(".jpg") && !href.endsWith(".png")) {
+								toVisit.add(href);
+							}
+						}
+					}
 
-        // Process synchronously (can make async with SSE later for progress)
-        processWebsite(source.getId(), url, maxPages);
+				} catch (Exception e) {
+					log.warn("Failed to crawl {}: {}", currentUrl, e.getMessage());
+				}
+			}
 
-        return SourceResponse.from(sourceRepo.findById(source.getId()).orElseThrow());
-    }
+			String content = allContent.toString();
+			source.setContent(content);
+			source.setCharCount(content.length());
+			source.setStatus("ready");
 
-    private void processWebsite(Long sourceId, String url, int maxPages) {
-        KnowledgeSource source = sourceRepo.findById(sourceId).orElseThrow();
-        try {
-            // 1. Crawl website
-            TextExtractorService.CrawlResult result = extractor.crawlWebsite(url, maxPages);
+			// Create knowledge entries
+			List<String> chunks = chunkText(content, 500);
+			source.setChunksCount(chunks.size());
 
-            if (result.error != null) {
-                source.setStatus(SourceStatus.FAILED);
-                source.setErrorMessage(result.error);
-                sourceRepo.save(source);
-                return;
-            }
+			for (int i = 0; i < chunks.size(); i++) {
+				KnowledgeEntry entry = KnowledgeEntry.builder().merchant(merchant).type("website")
+						.question(url + " (section " + (i + 1) + ")").answer(chunks.get(i)).build();
+				entryRepository.save(entry);
+			}
 
-            if (result.pages.isEmpty()) {
-                source.setStatus(SourceStatus.FAILED);
-                source.setErrorMessage("No readable content found on the website");
-                sourceRepo.save(source);
-                return;
-            }
+			sourceRepository.save(source);
+			return sourceToMap(source);
 
-            // 2. Combine all page texts
-            StringBuilder allText = new StringBuilder();
-            for (var page : result.pages) {
-                allText.append("## ").append(page.title).append("\n");
-                allText.append(page.text).append("\n\n");
-            }
+		} catch (Exception e) {
+			log.error("Website crawl failed: {}", e.getMessage());
+			source.setStatus("failed");
+			source.setErrorMessage(e.getMessage());
+			sourceRepository.save(source);
+			return sourceToMap(source);
+		}
+	}
 
-            String combinedText = allText.toString().trim();
-            source.setExtractedText(combinedText);
-            source.setCharCount(combinedText.length());
-            source.setPagesCrawled(result.pages.size());
+	// ── Add manual text ──
+	@Transactional
+	public Map<String, Object> addText(UUID merchantId, String title, String content) {
+		Merchant merchant = merchantRepository.findById(merchantId).orElseThrow();
 
-            // 3. Chunk the combined text (use page-aware chunking)
-            int chunkIndex = 0;
-            for (var page : result.pages) {
-                List<String> pageChunks = extractor.chunkText(page.text);
-                for (String chunkText : pageChunks) {
-                    KnowledgeChunk chunk = new KnowledgeChunk();
-                    chunk.setKnowledgeSource(source);
-                    chunk.setMerchantId(source.getMerchantId());
-                    chunk.setChunkIndex(chunkIndex++);
-                    chunk.setContent(chunkText);
-                    chunk.setCharCount(chunkText.length());
-                    chunk.setSourcePage(page.url);
-                    source.getChunks().add(chunk);
-                }
-            }
-            source.setChunkCount(chunkIndex);
-            source.setStatus(SourceStatus.READY);
-            log.info("Website crawled: {} → {} pages, {} chunks", source.getName(), result.pages.size(), chunkIndex);
+		KnowledgeSource source = KnowledgeSource.builder().merchant(merchant).type("text").name(title).content(content)
+				.charCount(content.length()).status("ready").build();
 
-        } catch (Exception e) {
-            log.error("Failed to crawl website {}: {}", url, e.getMessage());
-            source.setStatus(SourceStatus.FAILED);
-            source.setErrorMessage(e.getMessage());
-        }
-        sourceRepo.save(source);
-    }
+		List<String> chunks = chunkText(content, 500);
+		source.setChunksCount(chunks.size());
+		source = sourceRepository.save(source);
 
-    // ──────────────── Manual Text ────────────────
+		for (int i = 0; i < chunks.size(); i++) {
+			KnowledgeEntry entry = KnowledgeEntry.builder().merchant(merchant).type("text")
+					.question(title + (chunks.size() > 1 ? " (part " + (i + 1) + ")" : "")).answer(chunks.get(i))
+					.build();
+			entryRepository.save(entry);
+		}
 
-    @Transactional
-    public SourceResponse addText(Long merchantId, String title, String content) {
-        KnowledgeSource source = new KnowledgeSource();
-        source.setMerchantId(merchantId);
-        source.setType(SourceType.TEXT);
-        source.setName(title);
-        source.setRawText(content);
-        source.setExtractedText(content);
-        source.setCharCount(content.length());
-        source.setStatus(SourceStatus.PROCESSING);
-        source = sourceRepo.save(source);
+		return sourceToMap(source);
+	}
 
-        // Chunk the text
-        List<String> chunks = extractor.chunkText(content);
-        source.setChunkCount(chunks.size());
+	// ── Add FAQ ──
+	@Transactional
+	public Map<String, Object> addFaq(UUID merchantId, String question, String answer) {
+		Merchant merchant = merchantRepository.findById(merchantId).orElseThrow();
 
-        for (int i = 0; i < chunks.size(); i++) {
-            KnowledgeChunk chunk = new KnowledgeChunk();
-            chunk.setKnowledgeSource(source);
-            chunk.setMerchantId(source.getMerchantId());
-            chunk.setChunkIndex(i);
-            chunk.setContent(chunks.get(i));
-            chunk.setCharCount(chunks.get(i).length());
-            source.getChunks().add(chunk);
-        }
+		KnowledgeEntry entry = KnowledgeEntry.builder().merchant(merchant).type("faq").question(question).answer(answer)
+				.build();
+		entry = entryRepository.save(entry);
 
-        source.setStatus(SourceStatus.READY);
-        sourceRepo.save(source);
+		return Map.of("id", entry.getId().toString(), "type", "faq", "question", entry.getQuestion(), "answer",
+				entry.getAnswer(), "createdAt", entry.getCreatedAt().toString());
+	}
 
-        log.info("Text added: {} → {} chunks", title, chunks.size());
-        return SourceResponse.from(source);
-    }
+	// ── Delete source ──
+	@Transactional
+	public void deleteSource(UUID merchantId, UUID sourceId) {
+		KnowledgeSource source = sourceRepository.findByIdAndMerchantId(sourceId, merchantId)
+				.orElseThrow(() -> new RuntimeException("Source not found"));
 
-    // ──────────────── Delete Source ────────────────
+		// Delete associated entries
+		List<KnowledgeEntry> entries = entryRepository.findByMerchantId(merchantId);
+		String sourceName = source.getName();
+		entries.stream().filter(e -> e.getQuestion() != null && e.getQuestion().startsWith(sourceName))
+				.forEach(entryRepository::delete);
 
-    @Transactional
-    public void deleteSource(Long merchantId, Long sourceId) {
-        KnowledgeSource source = sourceRepo.findById(sourceId)
-            .orElseThrow(() -> new RuntimeException("Source not found"));
+		sourceRepository.delete(source);
+	}
 
-        if (!source.getMerchantId().equals(merchantId)) {
-            throw new RuntimeException("Unauthorized");
-        }
+	// ── Delete FAQ entry ──
+	@Transactional
+	public void deleteEntry(UUID merchantId, UUID entryId) {
+		KnowledgeEntry entry = entryRepository.findById(entryId).orElseThrow();
+		if (!entry.getMerchant().getId().equals(merchantId))
+			throw new RuntimeException("Forbidden");
+		entryRepository.delete(entry);
+	}
 
-        sourceRepo.delete(source); // cascades to chunks
-        log.info("Deleted knowledge source: {} ({})", source.getName(), sourceId);
-    }
+	// ── File content extraction ──
+	private String extractFileContent(MultipartFile file) throws Exception {
+		String filename = file.getOriginalFilename().toLowerCase();
 
-    // ──────────────── Build AI Knowledge Context ────────────────
+		if (filename.endsWith(".pdf")) {
+			return extractPdf(file);
+		} else if (filename.endsWith(".txt") || filename.endsWith(".md") || filename.endsWith(".csv")) {
+			return extractText(file);
+		} else {
+			throw new RuntimeException("Unsupported file type. Supported: PDF, TXT, MD, CSV");
+		}
+	}
 
-    /**
-     * Get all knowledge chunks for a merchant, formatted for the AI system prompt.
-     * This is called by your existing AI/chatbot service when building the prompt.
-     */
-    public String buildKnowledgePrompt(Long merchantId) {
-        List<KnowledgeChunk> chunks = chunkRepo
-            .findByMerchantIdOrderByKnowledgeSourceIdAscChunkIndexAsc(merchantId);
+	private String extractPdf(MultipartFile file) throws Exception {
+		try (PDDocument doc = Loader.loadPDF(file.getBytes())) {
+			PDFTextStripper stripper = new PDFTextStripper();
+			return stripper.getText(doc).trim();
+		}
+	}
 
-        if (chunks.isEmpty()) return "";
+	private String extractText(MultipartFile file) throws Exception {
+		try (BufferedReader reader = new BufferedReader(
+				new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
+			return reader.lines().collect(Collectors.joining("\n")).trim();
+		}
+	}
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("\n\n--- BUSINESS KNOWLEDGE BASE ---\n");
-        sb.append("The following is information about this business. Use it to answer customer questions accurately.\n\n");
+	// ── Text chunking ──
+	private List<String> chunkText(String text, int maxChars) {
+		if (text.length() <= maxChars)
+			return List.of(text);
 
-        Long currentSourceId = null;
-        for (KnowledgeChunk chunk : chunks) {
-            if (!chunk.getKnowledgeSource().getId().equals(currentSourceId)) {
-                currentSourceId = chunk.getKnowledgeSource().getId();
-                sb.append("\n[Source: ").append(chunk.getKnowledgeSource().getName()).append("]\n");
-            }
-            sb.append(chunk.getContent()).append("\n");
-        }
+		List<String> chunks = new ArrayList<>();
+		String[] paragraphs = text.split("\n\n");
+		StringBuilder current = new StringBuilder();
 
-        sb.append("\n--- END KNOWLEDGE BASE ---\n");
-        return sb.toString();
-    }
+		for (String para : paragraphs) {
+			if (current.length() + para.length() > maxChars && current.length() > 0) {
+				chunks.add(current.toString().trim());
+				current = new StringBuilder();
+			}
+			current.append(para).append("\n\n");
+		}
 
-    /**
-     * Alternative: Get structured knowledge context (for API response).
-     */
-    public KnowledgeContext getKnowledgeContext(Long merchantId) {
-        List<KnowledgeChunk> chunks = chunkRepo
-            .findByMerchantIdOrderByKnowledgeSourceIdAscChunkIndexAsc(merchantId);
+		if (current.length() > 0) {
+			chunks.add(current.toString().trim());
+		}
 
-        var entries = chunks.stream()
-            .map(c -> new KnowledgeContext.ChunkEntry(
-                c.getKnowledgeSource().getName(),
-                c.getKnowledgeSource().getType().name(),
-                c.getContent()
-            ))
-            .toList();
+		return chunks;
+	}
 
-        int totalChars = chunks.stream().mapToInt(KnowledgeChunk::getCharCount).sum();
-        return new KnowledgeContext(chunks.size(), totalChars, entries);
-    }
+	// ── URL helpers ──
+	private String normalizeUrl(String url) {
+		if (!url.startsWith("http"))
+			url = "https://" + url;
+		if (url.endsWith("/"))
+			url = url.substring(0, url.length() - 1);
+		return url;
+	}
 
-    // ──────────────── Helpers ────────────────
+	private String extractDomain(String url) {
+		try {
+			String host = new java.net.URL(normalizeUrl(url)).getHost();
+			return host.startsWith("www.") ? host.substring(4) : host;
+		} catch (Exception e) {
+			return url;
+		}
+	}
 
-    private String extractDomain(String url) {
-        try {
-            return new java.net.URI(url).getHost();
-        } catch (Exception e) {
-            return url;
-        }
-    }
+	// ── Mapping ──
+	private Map<String, Object> sourceToMap(KnowledgeSource s) {
+		Map<String, Object> m = new LinkedHashMap<>();
+		m.put("id", s.getId().toString());
+		m.put("type", s.getType());
+		m.put("name", s.getName());
+		m.put("url", s.getUrl());
+		m.put("fileName", s.getFileName());
+		m.put("status", s.getStatus());
+		m.put("chunksCount", s.getChunksCount());
+		m.put("charCount", s.getCharCount());
+		m.put("errorMessage", s.getErrorMessage());
+		m.put("createdAt", s.getCreatedAt().toString());
+		return m;
+	}
 }
